@@ -1,4 +1,6 @@
+import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import auc, roc_curve
@@ -49,7 +51,6 @@ def SSIM(real, recon):
 
 
 def IoU(real, recon):
-    import numpy as np
     real = real.cpu().numpy()
     recon = recon.cpu().numpy()
     intersection = np.logical_and(real, recon)
@@ -87,7 +88,7 @@ def AUC_score(fpr, tpr):
     return auc(fpr, tpr)
 
 
-def testing(testing_dataset_loader, diffusion, args, ema, model):
+def testing(testing_dataset_loader, diffusion, args, ema, model, device):
     """
     Samples videos on test set & calculates some metrics such as PSNR & VLB.
     PSNR for diffusion is found by sampling x_0 to T//2 and then finding a prediction of x_0
@@ -215,18 +216,17 @@ def main():
     _, testing_dataset = dataset.init_datasets("./", args)
     testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
 
-    testing(testing_dataset_loader, diff, args, ema, unet)
+    testing(testing_dataset_loader, diff, args, ema, unet, device)
 
 
 
 if __name__ == '__main__':
     import dataset
     import os
-    import matplotlib.animation as animation
-    import numpy as np
     from GaussianDiffusion import GaussianDiffusionModel, get_beta_schedule
     from UNet import UNetModel
     from detection import load_parameters
 
+    # TODO: this is dangerous and can cause a bug. consider moving device to a parameter
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     main()

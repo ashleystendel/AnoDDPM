@@ -150,7 +150,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
 
     save(unet=model, args=args, optimiser=optimiser, final=True, ema=ema)
 
-    evaluation.testing(testing_dataset_loader, diffusion, ema=ema, args=args, model=model)
+    evaluation.testing(testing_dataset_loader, diffusion, ema=ema, args=args, model=model, device=device)
 
 
 def save(final, unet, optimiser, args, ema, loss=0, epoch=0):

@@ -1,7 +1,7 @@
 library_NFBS
-DATASETS/Train
-DATASETS/Test
-model/diff-params-24-11-100epochs
+DATASETS/*
+model/*
+diffusion-*/
 library_NFBS/NFBS_Dataset.tar
 .idea
 .DS_Store

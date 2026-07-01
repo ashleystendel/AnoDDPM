@@ -50,6 +50,16 @@ For access to checkpoints, please get in touch. For access to datasets, please r
 
 ## How To...
 
+### Setup 
+
+```commandline
+# create a new venv 
+
+pip install -r requirements.txt
+
+python scripts/setup.py
+```
+
 ### Train
 
 To train a model, run `python3 diffusion_training.py ARG_NUM` where `ARG_NUM` is the number relating to the json arg

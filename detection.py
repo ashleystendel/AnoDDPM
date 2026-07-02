@@ -922,14 +922,7 @@ def ce_sliding_window(img, netG, input_cropped, args):
 
 if __name__ == "__main__":
     import sys
-    from matplotlib import font_manager
 
-    font_path = "./times new roman.ttf"
-    font_manager.fontManager.addfont(font_path)
-    prop = font_manager.FontProperties(fname=font_path)
-
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = prop.get_name()
     DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

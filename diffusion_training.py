@@ -367,14 +367,14 @@ def main():
             for i in checkpoints:
                 try:
                     file_dir = f"./model/diff-params-ARGS={args['arg_num']}/checkpoint/{i}"
-                    loaded_model = torch.load(file_dir, map_location=device)
+                    loaded_model = torch.load(file_dir, map_location=device, weights_only=False)
                     break
                 except RuntimeError:
                     continue
 
         else:
             file_dir = f'./model/diff-params-ARGS={args["arg_num"]}/params-final.pt'
-            loaded_model = torch.load(file_dir, map_location=device)
+            loaded_model = torch.load(file_dir, map_location=device, weights_only=False)
 
     # load, pass args
     train(training_dataset_loader, testing_dataset_loader, args, loaded_model)

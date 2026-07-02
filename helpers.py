@@ -31,14 +31,14 @@ def load_checkpoint(param, use_checkpoint, device):
     :return:
     """
     if not use_checkpoint:
-        return torch.load(f'./model/diff-params-ARGS={param}/params-final.pt', map_location=device)
+        return torch.load(f'./model/diff-params-ARGS={param}/params-final.pt', map_location=device, weights_only=False)
     else:
         checkpoints = os.listdir(f'./model/diff-params-ARGS={param}/checkpoint')
         checkpoints.sort(reverse=True)
         for i in checkpoints:
             try:
                 file_dir = f"./model/diff-params-ARGS={param}/checkpoint/{i}"
-                loaded_model = torch.load(file_dir, map_location=device)
+                loaded_model = torch.load(file_dir, map_location=device, weights_only=False)
                 break
             except RuntimeError:
                 continue

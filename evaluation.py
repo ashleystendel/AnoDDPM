@@ -47,7 +47,10 @@ def PSNR(recon, real):
 
 
 def SSIM(real, recon):
-    return ssim(real.detach().cpu().numpy(), recon.detach().cpu().numpy(), channel_axis=2)
+    real = real.detach().cpu().numpy()
+    recon = recon.detach().cpu().numpy()
+    data_range = real.max() - real.min()
+    return ssim(real, recon, channel_axis=2, data_range=data_range)
 
 
 def IoU(real, recon):

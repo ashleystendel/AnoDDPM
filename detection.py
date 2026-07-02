@@ -197,6 +197,11 @@ def anomalous_metric_calculation():
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
+    try:
+        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps')
+    except OSError:
+        pass
+
     dice_data = []
     ssim_data = []
     IOU = []
@@ -248,6 +253,16 @@ def anomalous_metric_calculation():
         recall.append(evaluation.recall(mask, mse).cpu().numpy())
         IOU.append(evaluation.IoU(mask, mse))
         FPR.append(evaluation.FPR(mask, mse).cpu().numpy())
+
+        if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
+            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % 4}'
+        else:
+            heatmap_name = f'{i}'
+        evaluation.heatmap(
+                image, output.reshape(1, *args["img_size"]).to(device), mask,
+                f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps/{heatmap_name}.png'
+                )
+
         plt.close('all')
 
         if i % 8 == 0:
@@ -923,7 +938,10 @@ def ce_sliding_window(img, netG, input_cropped, args):
 if __name__ == "__main__":
     import sys
 
-    DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
+    if len(sys.argv) == 3:
+        DATASET_PATH = str(sys.argv[2])
+    else:
+        DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # if str(sys.argv[1]) == "100":
@@ -946,5 +964,4 @@ if __name__ == "__main__":
         sys.argv[1] = "28"
         graph_data()
     else:
-
         anomalous_metric_calculation()

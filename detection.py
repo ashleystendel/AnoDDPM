@@ -153,7 +153,7 @@ def anomalous_validation_1():
                 )
 
 
-def anomalous_metric_calculation():
+def anomalous_metric_calculation(uncertainty=False):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
     the heatmap of that & detection method (A&B) or C
@@ -202,6 +202,12 @@ def anomalous_metric_calculation():
     except OSError:
         pass
 
+    if uncertainty:
+        try:
+            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
+        except OSError:
+            pass
+
     dice_data = []
     ssim_data = []
     IOU = []
@@ -212,7 +218,6 @@ def anomalous_metric_calculation():
 
     start_time = time.time()
     for i in range(d_set_size):
-
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
             if i % 4 == 0:
                 new = next(loader)
@@ -225,10 +230,12 @@ def anomalous_metric_calculation():
             image = new["image"].to(device)
             mask = new["mask"].to(device)
 
+        pred_x0_seq = [] if uncertainty else None
         output = diff.forward_backward(
                 unet, image,
                 see_whole_sequence=None,
-                t_distance=200, denoise_fn=args["noise_fn"]
+                t_distance=200, denoise_fn=args["noise_fn"],
+                pred_x0_out=pred_x0_seq,
                 )
 
         mse = (image - output).square()
@@ -262,6 +269,19 @@ def anomalous_metric_calculation():
                 image, output.reshape(1, *args["img_size"]).to(device), mask,
                 f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps/{heatmap_name}.png'
                 )
+
+        if uncertainty:
+            unc = torch.stack(pred_x0_seq, dim=0).var(dim=0)
+            unc_scaled = (unc / unc.max().clamp(min=1e-8)) * 2 - 1
+            anom_scaled = ((image - output).square() * 2) - 1
+            anom_thresh = (anom_scaled > 0).float() * 2 - 1
+            out_tensor = torch.cat([image, output, anom_scaled, anom_thresh, unc_scaled])
+            plt.imshow(gridify_output(out_tensor, 5), cmap='gray')
+            plt.axis('off')
+            plt.savefig(
+                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}.png'
+                    )
+            plt.clf()
 
         plt.close('all')
 
@@ -937,8 +957,16 @@ def ce_sliding_window(img, netG, input_cropped, args):
 
 if __name__ == "__main__":
     import sys
+    import argparse
 
-    if len(sys.argv) == 3:
+    parser = argparse.ArgumentParser(description="AnoDDPM detection pipeline")
+    parser.add_argument(
+            '--uncertainty', action='store_true',
+            help='Run uncertainty detection — saves per-t anomaly and uncertainty maps'
+            )
+    cli_args, _ = parser.parse_known_args()
+
+    if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
         DATASET_PATH = str(sys.argv[2])
     else:
         DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
@@ -964,4 +992,4 @@ if __name__ == "__main__":
         sys.argv[1] = "28"
         graph_data()
     else:
-        anomalous_metric_calculation()
+        anomalous_metric_calculation(uncertainty=cli_args.uncertainty)

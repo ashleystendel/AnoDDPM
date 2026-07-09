@@ -159,7 +159,7 @@ def anomalous_metric_calculation(uncertainty=False):
     the heatmap of that & detection method (A&B) or C
     :return:
     """
-    args, output = load_parameters(device)
+    args, checkpoint = load_parameters(device)
     in_channels = 1
     if args["dataset"].lower() == "leather":
         in_channels = 3
@@ -176,7 +176,7 @@ def anomalous_metric_calculation(uncertainty=False):
             loss_type=args['loss-type'], noise=args["noise_fn"], img_channels=in_channels
             )
 
-    unet.load_state_dict(output["ema"])
+    unet.load_state_dict(checkpoint["ema"])
     unet.to(device)
     unet.eval()
     if args["dataset"].lower() == "carpet":
@@ -207,6 +207,14 @@ def anomalous_metric_calculation(uncertainty=False):
             os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
         except OSError:
             pass
+        if "n_samples_unc" not in args:
+            args["n_samples_unc"] = 5
+        n_samples_unc = int(args["n_samples_unc"])
+        if n_samples_unc < 2:
+            raise ValueError(f"n_samples_unc must be >= 2 to compute a variance for uncertainty maps, got {n_samples_unc}")
+        print(f"Running MC sampling with {n_samples_unc} forward_backward passes per image")
+    else:
+        n_samples_unc = 1
 
     dice_data = []
     ssim_data = []
@@ -229,23 +237,32 @@ def anomalous_metric_calculation(uncertainty=False):
             new = next(loader)
             image = new["image"].to(device)
             mask = new["mask"].to(device)
+        
+        outputs = []
+        pred_x0_runs = []
+        for _ in range(n_samples_unc):
+            pred_x0_seq = [] if uncertainty else None
+            outputs.append(
+                    diff.forward_backward(
+                            unet, image,
+                            see_whole_sequence=None,
+                            t_distance=200, denoise_fn=args["noise_fn"],
+                            pred_x0_out=pred_x0_seq,
+                            )
+                    )
+            if uncertainty:
+                pred_x0_runs.append(pred_x0_seq)
+        outputs = torch.stack(outputs, dim=0)
+        avg_output = outputs.mean(dim=0)
 
-        pred_x0_seq = [] if uncertainty else None
-        output = diff.forward_backward(
-                unet, image,
-                see_whole_sequence=None,
-                t_distance=200, denoise_fn=args["noise_fn"],
-                pred_x0_out=pred_x0_seq,
-                )
-
-        mse = (image - output).square()
+        mse = (image - avg_output).square()
         fpr_simplex, tpr_simplex, _ = evaluation.ROC_AUC(mask.to(torch.uint8), mse)
         AUC_scores.append(evaluation.AUC_score(fpr_simplex, tpr_simplex))
         mse = (mse > 0.5).float()
         # print(img.shape, output.shape, img_mask.shape, mse.shape)
         dice_data.append(
                 evaluation.dice_coeff(
-                        image, output.to(device),
+                        image, avg_output.to(device),
                         mask, mse=mse
                         ).cpu().item()
                 )
@@ -253,7 +270,7 @@ def anomalous_metric_calculation(uncertainty=False):
         ssim_data.append(
                 evaluation.SSIM(
                         image.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1]),
-                        output.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
+                        avg_output.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
                         )
                 )
         precision.append(evaluation.precision(mask, mse).cpu().numpy())
@@ -266,22 +283,33 @@ def anomalous_metric_calculation(uncertainty=False):
         else:
             heatmap_name = f'{i}'
         evaluation.heatmap(
-                image, output.reshape(1, *args["img_size"]).to(device), mask,
+                image, avg_output.reshape(1, *args["img_size"]).to(device), mask,
                 f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps/{heatmap_name}.png'
                 )
 
         if uncertainty:
-            unc = torch.stack(pred_x0_seq, dim=0).var(dim=0)
+            unc = outputs.var(dim=0)
             unc_scaled = (unc / unc.max().clamp(min=1e-8)) * 2 - 1
-            anom_scaled = ((image - output).square() * 2) - 1
+            anom_scaled = ((image - avg_output).square() * 2) - 1
             anom_thresh = (anom_scaled > 0).float() * 2 - 1
-            out_tensor = torch.cat([image, output, anom_scaled, anom_thresh, unc_scaled])
-            plt.imshow(gridify_output(out_tensor, 5), cmap='gray')
-            plt.axis('off')
+
+            panels = [image, avg_output, anom_scaled, anom_thresh, mask, unc_scaled]
+            titles = ["Image", "Reconstruction", "Anomaly Scaled", "Anomaly Thresh", "Ground Truth Mask",
+                      "MC Reconstruction Variance"]
+            fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 4))
+            for ax, panel, title in zip(axes, panels, titles):
+                ax.imshow(gridify_output(panel, 1), cmap='gray')
+                ax.set_title(title)
+                ax.axis('off')
             plt.savefig(
                     f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}.png'
                     )
             plt.clf()
+
+            torch.save(
+                    {"pred_x0_runs": pred_x0_runs, "unc": unc.cpu()},
+                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}_pred_x0.pt'
+                    )
 
         plt.close('all')
 

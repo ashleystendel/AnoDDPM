@@ -198,28 +198,7 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
-    try:
-        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps')
-    except OSError:
-        pass
-
-    if save_output and not uncertainty:
-        raise ValueError("save_output requires uncertainty to also be enabled")
-
-    if uncertainty:
-        try:
-            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
-        except OSError:
-            pass
-        if n_samples_unc is None:
-            if "n_samples_unc" not in args:
-                args["n_samples_unc"] = 10
-            n_samples_unc = int(args["n_samples_unc"])
-        if n_samples_unc < 2:
-            raise ValueError(f"n_samples_unc must be >= 2 to compute a variance for uncertainty maps, got {n_samples_unc}")
-        print(f"Running MC sampling with {n_samples_unc} independent forward_backward passes per image")
-    else:
-        n_samples_unc = 1
+    n_samples_unc = _initial_validation_args(args, n_samples_unc, save_output, uncertainty)
 
     dice_data = []
     ssim_data = []
@@ -365,6 +344,33 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
         f.write("dice,ssim,iou,precision,recall,fpr,auc\n")
         for METRIC in [dice_data, ssim_data, IOU, precision, recall, FPR, AUC_scores]:
             f.write(f"{np.mean(METRIC):.4f} +- {np.std(METRIC):.4f},")
+
+
+def _initial_validation_args(args, n_samples_unc, save_output: bool, uncertainty: bool) -> int:
+    try:
+        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps')
+    except OSError:
+        pass
+
+    if save_output and not uncertainty:
+        raise ValueError("save_output requires uncertainty to also be enabled")
+
+    if uncertainty:
+        try:
+            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
+        except OSError:
+            pass
+        if n_samples_unc is None:
+            if "n_samples_unc" not in args:
+                args["n_samples_unc"] = 10
+            n_samples_unc = int(args["n_samples_unc"])
+        if n_samples_unc < 2:
+            raise ValueError(
+                f"n_samples_unc must be >= 2 to compute a variance for uncertainty maps, got {n_samples_unc}")
+        print(f"Running MC sampling with {n_samples_unc} independent forward_backward passes per image")
+    else:
+        n_samples_unc = 1
+    return n_samples_unc
 
 
 def graph_data():

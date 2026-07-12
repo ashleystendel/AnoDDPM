@@ -319,7 +319,6 @@ class GaussianDiffusionModel:
 
     def forward_backward(
             self, model, x, see_whole_sequence="half", t_distance=None, denoise_fn="gauss",
-            pred_x0_out=None,
             ):
         assert see_whole_sequence == "whole" or see_whole_sequence == "half" or see_whole_sequence == None
 
@@ -354,8 +353,6 @@ class GaussianDiffusionModel:
             with torch.no_grad():
                 out = self.sample_p(model, x, t_batch, denoise_fn)
                 x = out["sample"]
-                if pred_x0_out is not None:
-                    pred_x0_out.append(out["pred_x_0"].cpu().detach())
             if see_whole_sequence:
                 seq.append(x.cpu().detach())
 

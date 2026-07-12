@@ -1,5 +1,6 @@
 import random
 import time
+from pathlib import Path
 
 # import matplotlib
 # matplotlib.use("TkAgg")
@@ -153,7 +154,7 @@ def anomalous_validation_1():
                 )
 
 
-def anomalous_metric_calculation(uncertainty=False):
+def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_output=False):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
     the heatmap of that & detection method (A&B) or C
@@ -202,17 +203,21 @@ def anomalous_metric_calculation(uncertainty=False):
     except OSError:
         pass
 
+    if save_output and not uncertainty:
+        raise ValueError("save_output requires uncertainty to also be enabled")
+
     if uncertainty:
         try:
             os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
         except OSError:
             pass
-        if "n_samples_unc" not in args:
-            args["n_samples_unc"] = 5
-        n_samples_unc = int(args["n_samples_unc"])
+        if n_samples_unc is None:
+            if "n_samples_unc" not in args:
+                args["n_samples_unc"] = 10
+            n_samples_unc = int(args["n_samples_unc"])
         if n_samples_unc < 2:
             raise ValueError(f"n_samples_unc must be >= 2 to compute a variance for uncertainty maps, got {n_samples_unc}")
-        print(f"Running MC sampling with {n_samples_unc} forward_backward passes per image")
+        print(f"Running MC sampling with {n_samples_unc} independent forward_backward passes per image")
     else:
         n_samples_unc = 1
 
@@ -238,21 +243,18 @@ def anomalous_metric_calculation(uncertainty=False):
             image = new["image"].to(device)
             mask = new["mask"].to(device)
         
-        outputs = []
-        pred_x0_runs = []
-        for _ in range(n_samples_unc):
-            pred_x0_seq = [] if uncertainty else None
-            outputs.append(
+        # n_samples_unc independent forward_backward passes (n_samples_unc=1 when
+        # uncertainty=False, degenerating to a single plain reconstruction)
+        outputs = torch.stack(
+                [
                     diff.forward_backward(
                             unet, image,
                             see_whole_sequence=None,
-                            t_distance=200, denoise_fn=args["noise_fn"],
-                            pred_x0_out=pred_x0_seq,
+                            t_distance=args["sample_distance"], denoise_fn=args["noise_fn"],
                             )
-                    )
-            if uncertainty:
-                pred_x0_runs.append(pred_x0_seq)
-        outputs = torch.stack(outputs, dim=0)
+                    for _ in range(n_samples_unc)
+                    ], dim=0
+                )
         avg_output = outputs.mean(dim=0)
 
         mse = (image - avg_output).square()
@@ -288,9 +290,13 @@ def anomalous_metric_calculation(uncertainty=False):
                 )
 
         if uncertainty:
+            # variance across the n_samples_unc independent final reconstructions
             unc = outputs.var(dim=0)
             unc_scaled = (unc / unc.max().clamp(min=1e-8)) * 2 - 1
-            anom_scaled = ((image - avg_output).square() * 2) - 1
+            # average of the per-pass anomaly maps (not the anomaly map of the
+            # averaged reconstruction)
+            anomaly_map = (image.unsqueeze(0) - outputs).square().mean(dim=0)
+            anom_scaled = (anomaly_map * 2) - 1
             anom_thresh = (anom_scaled > 0).float() * 2 - 1
 
             panels = [image, avg_output, anom_scaled, anom_thresh, mask, unc_scaled]
@@ -307,9 +313,20 @@ def anomalous_metric_calculation(uncertainty=False):
             plt.clf()
 
             torch.save(
-                    {"pred_x0_runs": pred_x0_runs, "unc": unc.cpu()},
+                    {"outputs": outputs.cpu(), "unc": unc.cpu()},
                     f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}_pred_x0.pt'
                     )
+
+            if save_output:
+                folder_name, slice_idx = heatmap_name.split("-slice=") if "-slice=" in heatmap_name else (heatmap_name, "0")
+                path = Path("./results") / folder_name / slice_idx
+                
+                path.mkdir(parents=True, exist_ok=True)
+
+                np.save(f'{path}/{heatmap_name}_image.npy', image.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_mask.npy', mask.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_anomaly.npy', anomaly_map.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_unc.npy', unc.cpu().numpy())
 
         plt.close('all')
 
@@ -992,6 +1009,16 @@ if __name__ == "__main__":
             '--uncertainty', action='store_true',
             help='Run uncertainty detection — saves per-t anomaly and uncertainty maps'
             )
+    parser.add_argument(
+            '--n-samples-unc', type=int, default=None, dest='n_samples_unc',
+            help='Number of MC sampling passes per image for uncertainty maps '
+                 '(overrides n_samples_unc in the args config if set)'
+            )
+    parser.add_argument(
+            '--save-output', action='store_true', dest='save_output',
+            help='Save per-slice .npy files (brain slice, ground truth mask, anomaly map, '
+                 'uncertainty map) to ./results/. Requires --uncertainty.'
+            )
     cli_args, _ = parser.parse_known_args()
 
     if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
@@ -1020,4 +1047,7 @@ if __name__ == "__main__":
         sys.argv[1] = "28"
         graph_data()
     else:
-        anomalous_metric_calculation(uncertainty=cli_args.uncertainty)
+        anomalous_metric_calculation(
+            uncertainty=cli_args.uncertainty, n_samples_unc=cli_args.n_samples_unc,
+            save_output=cli_args.save_output,
+        )

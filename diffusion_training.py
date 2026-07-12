@@ -1,3 +1,4 @@
+import argparse
 import collections
 import copy
 import sys
@@ -299,6 +300,16 @@ def main():
         args = json.load(f)
     args['arg_num'] = file[4:-5]
     args = defaultdict_from_json(args)
+
+
+    parser = argparse.ArgumentParser(description="AnoDDPM training")
+    parser.add_argument(
+            '--subset-size', type=int, default=None, dest='subset_size',
+            help='Train on only the first N images in DATASETS/Train/ instead of all of them'
+            )
+    cli_args, _ = parser.parse_known_args()
+    if cli_args.subset_size is not None:
+        args['subset_size'] = cli_args.subset_size
 
     # make arg specific directories
     for i in [f'./model/diff-params-ARGS={args["arg_num"]}',

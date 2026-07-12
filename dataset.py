@@ -28,12 +28,13 @@ def make_pngs_anogan():
         "Anomalous": "./DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1"
         }
     slices = {
-        "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
-        "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
-        "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
-        "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
-        "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
-        "19723": range(140, 170), "19849": range(150, 180)
+        "19567": range(165, 205),
+        # "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
+        # "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
+        # "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
+        # "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
+        # "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
+        # "19723": range(140, 170), "19849": range(150, 180)
         }
     center_crop = 235
     import os
@@ -349,8 +350,10 @@ def load_datasets_for_test():
 
 
 def init_datasets(ROOT_DIR, args):
+    subset_size = int(args["subset_size"]) if args.get("subset_size") else None
     training_dataset = MRIDataset(
-            ROOT_DIR=f'{ROOT_DIR}DATASETS/Train/', img_size=args['img_size'], random_slice=args['random_slice']
+            ROOT_DIR=f'{ROOT_DIR}DATASETS/Train/', img_size=args['img_size'], random_slice=args['random_slice'],
+            subset_size=subset_size
             )
     testing_dataset = MRIDataset(
             ROOT_DIR=f'{ROOT_DIR}DATASETS/Test/', img_size=args['img_size'], random_slice=args['random_slice']
@@ -575,12 +578,14 @@ class MVTec(Dataset):
 class MRIDataset(Dataset):
     """Healthy MRI dataset."""
 
-    def __init__(self, ROOT_DIR, transform=None, img_size=(32, 32), random_slice=False):
+    def __init__(self, ROOT_DIR, transform=None, img_size=(32, 32), random_slice=False, subset_size=None):
         """
         Args:
             ROOT_DIR (string): Directory with all the images.
             transform (callable, optional): Optional transform to be applied
                 on a sample.
+            subset_size (int, optional): if set, only use the first subset_size
+                subjects found in ROOT_DIR instead of the whole directory.
         """
         self.transform = transforms.Compose(
                 [transforms.ToPILImage(),
@@ -596,6 +601,8 @@ class MRIDataset(Dataset):
         self.filenames = os.listdir(ROOT_DIR)
         if ".DS_Store" in self.filenames:
             self.filenames.remove(".DS_Store")
+        if subset_size is not None:
+            self.filenames = self.filenames[:subset_size]
         self.ROOT_DIR = ROOT_DIR
         self.random_slice = random_slice
 

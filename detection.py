@@ -1,6 +1,5 @@
 import random
 import time
-from pathlib import Path
 
 # import matplotlib
 # matplotlib.use("TkAgg")
@@ -198,8 +197,6 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
-    n_samples_unc = _initial_validation_args(args, n_samples_unc, save_output, uncertainty)
-
     dice_data = []
     ssim_data = []
     IOU = []
@@ -210,6 +207,7 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
 
     start_time = time.time()
     for i in range(d_set_size):
+
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
             if i % 4 == 0:
                 new = next(loader)
@@ -221,7 +219,7 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
             new = next(loader)
             image = new["image"].to(device)
             mask = new["mask"].to(device)
-        
+
         # n_samples_unc independent forward_backward passes (n_samples_unc=1 when
         # uncertainty=False, degenerating to a single plain reconstruction)
         outputs = torch.stack(
@@ -299,7 +297,7 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
             if save_output:
                 folder_name, slice_idx = heatmap_name.split("-slice=") if "-slice=" in heatmap_name else (heatmap_name, "0")
                 path = Path("./results") / folder_name / slice_idx
-                
+
                 path.mkdir(parents=True, exist_ok=True)
 
                 np.save(f'{path}/{heatmap_name}_image.npy', image.cpu().numpy())

@@ -154,13 +154,16 @@ def anomalous_validation_1():
                 )
 
 
-def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_output=False):
+def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
     the heatmap of that & detection method (A&B) or C
     :return:
     """
     args, checkpoint = load_parameters(device)
+    if sample_distance is not None:
+        args["sample_distance"] = sample_distance
+        print(f"Overriding sample_distance (t_distance) -> {sample_distance}")
     in_channels = 1
     if args["dataset"].lower() == "leather":
         in_channels = 3
@@ -1025,6 +1028,12 @@ if __name__ == "__main__":
             help='Save per-slice .npy files (brain slice, ground truth mask, anomaly map, '
                  'uncertainty map) to ./results/. Requires --uncertainty.'
             )
+    parser.add_argument(
+            '--sample-distance', type=int, default=None, dest='sample_distance',
+            help='Override the diffusion noise depth (t_distance). NOTE: the value in '
+                 'test_args/*.json is IGNORED because args are loaded from the model '
+                 'checkpoint (which has sample_distance baked in); use this flag to control it.'
+            )
     cli_args, _ = parser.parse_known_args()
 
     if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
@@ -1055,5 +1064,5 @@ if __name__ == "__main__":
     else:
         anomalous_metric_calculation(
             uncertainty=cli_args.uncertainty, n_samples_unc=cli_args.n_samples_unc,
-            save_output=cli_args.save_output,
+            save_output=cli_args.save_output, sample_distance=cli_args.sample_distance,
         )

@@ -11,17 +11,16 @@ dst = root / "DATASETS" / "Train"
 
 
 def anoddpm_normalize(vol: np.ndarray) -> np.ndarray:
-    """Asymmetric mean/std window, computed over foreground (nonzero) voxels only
-    so background doesn't skew the contrast window; background is forced back
-    to exactly 0 afterward, since clipping against foreground-derived bounds
-    would otherwise lift it above black."""
+    """Percentile min-max within the brain (foreground): clip brain intensities to
+    [1st, 99th] percentile and scale to [0, 1]; background stays 0. Standard for
+    skull-stripped brain MRI -- robust to outliers, keeps a natural T1 look
+    (white matter bright, gray matter mid, CSF dark)."""
     vol = vol.astype(np.float32)
     mask = vol > 0
-    foreground = vol[mask]
-    image_mean, image_std = foreground.mean(), foreground.std()
-    img_range = (image_mean - 1 * image_std, image_mean + 2 * image_std)
-    image = np.clip(vol, img_range[0], img_range[1])
-    image = image / (img_range[1] - img_range[0])
+    fg = vol[mask]
+    lo, hi = np.percentile(fg, 1), np.percentile(fg, 99)
+    image = np.clip(vol, lo, hi)
+    image = (image - lo) / (hi - lo)
     image[~mask] = 0
     return image.astype(np.float32)
 
@@ -38,25 +37,22 @@ for pkl_path in src.glob('*.pkl'):
 
     img = np.asarray(img, dtype=np.float32)
 
-    # Raw axes are (sagittal=160, axial=192, coronal=224) — axis 1 is already
-    # axial (confirmed by visual inspection), so no transpose is needed.
-    # AnoDDPM's MRIDataset expects each axial slice to be 256x192. Scale the
-    # per-slice (axis 0, axis 2) plane by a single uniform factor (so we don't
-    # stretch/distort the brain's proportions) and black-pad the remainder to
-    # reach exactly 256x192, keeping the axial slice count (axis 1) unchanged.
-    h, n_slices, w = img.shape
-    scale = min(256 / h, 192 / w)
-    new_h, new_w = round(h * scale), round(w * scale)
-    img = resize(img, (new_h, n_slices, new_w), order=1, preserve_range=True, anti_aliasing=True)
+    # Raw IXI axes: 0 = left-right, 1 = axial (superior-inferior), 2 = anterior-posterior.
+    # NFBS is served by MRIDataset as [:, slice, :] = (AP vertical = 256, LR horizontal = 192),
+    # anterior up. Rotate the (LR, AP) plane by +90 deg so AP becomes vertical and anterior
+    # ends up at the top. Verified with the cerebellum landmark (this puts the cerebellum at
+    # the bottom, matching NFBS). The original 180-deg rot90 left AP horizontal -> 90 deg off.
+    img = np.rot90(img, 1, axes=(0, 2))   # (AP=224, SI=192, LR=160)
 
-    pad_h = 256 - new_h
+    # IXI is already 1mm isotropic, same as NFBS, and the brains are the same physical
+    # size (~170-180 vox). So DO NOT resize/scale -- just black-pad the axial plane
+    # (axis 0 = AP, axis 2 = LR) to 256 x 192, keeping the brain at NFBS scale.
+    h, n_slices, w = img.shape            # (224, 192, 160)
+    pad_h = 256 - h
     pad_top, pad_bot = pad_h // 2, pad_h - pad_h // 2
-    pad_w = 192 - new_w
+    pad_w = 192 - w
     pad_left, pad_right = pad_w // 2, pad_w - pad_w // 2
     img = np.pad(img, ((pad_top, pad_bot), (0, 0), (pad_left, pad_right)), mode='constant', constant_values=0)
-
-    # rotate each axial slice (axes 0, 2) 180 degrees to match sub-r001s023's orientation
-    img = np.rot90(img, 2, axes=(0, 2))
 
     img = anoddpm_normalize(img)
 

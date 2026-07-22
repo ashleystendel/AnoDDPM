@@ -1,5 +1,6 @@
 import random
 import time
+from pathlib import Path
 
 # import matplotlib
 # matplotlib.use("TkAgg")
@@ -153,13 +154,16 @@ def anomalous_validation_1():
                 )
 
 
-def anomalous_metric_calculation():
+def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
     the heatmap of that & detection method (A&B) or C
     :return:
     """
-    args, output = load_parameters(device)
+    args, checkpoint = load_parameters(device)
+    if sample_distance is not None:
+        args["sample_distance"] = sample_distance
+        print(f"Overriding sample_distance (t_distance) -> {sample_distance}")
     in_channels = 1
     if args["dataset"].lower() == "leather":
         in_channels = 3
@@ -176,7 +180,7 @@ def anomalous_metric_calculation():
             loss_type=args['loss-type'], noise=args["noise_fn"], img_channels=in_channels
             )
 
-    unet.load_state_dict(output["ema"])
+    unet.load_state_dict(checkpoint["ema"])
     unet.to(device)
     unet.eval()
     if args["dataset"].lower() == "carpet":
@@ -197,6 +201,8 @@ def anomalous_metric_calculation():
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
+    n_samples_unc = _initial_validation_args(args, n_samples_unc, save_output, uncertainty)
+
     dice_data = []
     ssim_data = []
     IOU = []
@@ -207,7 +213,6 @@ def anomalous_metric_calculation():
 
     start_time = time.time()
     for i in range(d_set_size):
-
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
             if i % 4 == 0:
                 new = next(loader)
@@ -219,21 +224,29 @@ def anomalous_metric_calculation():
             new = next(loader)
             image = new["image"].to(device)
             mask = new["mask"].to(device)
-
-        output = diff.forward_backward(
-                unet, image,
-                see_whole_sequence=None,
-                t_distance=200, denoise_fn=args["noise_fn"]
+        
+        # n_samples_unc independent forward_backward passes (n_samples_unc=1 when
+        # uncertainty=False, degenerating to a single plain reconstruction)
+        outputs = torch.stack(
+                [
+                    diff.forward_backward(
+                            unet, image,
+                            see_whole_sequence=None,
+                            t_distance=args["sample_distance"], denoise_fn=args["noise_fn"],
+                            )
+                    for _ in range(n_samples_unc)
+                    ], dim=0
                 )
+        avg_output = outputs.mean(dim=0)
 
-        mse = (image - output).square()
+        mse = (image - avg_output).square()
         fpr_simplex, tpr_simplex, _ = evaluation.ROC_AUC(mask.to(torch.uint8), mse)
         AUC_scores.append(evaluation.AUC_score(fpr_simplex, tpr_simplex))
         mse = (mse > 0.5).float()
         # print(img.shape, output.shape, img_mask.shape, mse.shape)
         dice_data.append(
                 evaluation.dice_coeff(
-                        image, output.to(device),
+                        image, avg_output.to(device),
                         mask, mse=mse
                         ).cpu().item()
                 )
@@ -241,13 +254,62 @@ def anomalous_metric_calculation():
         ssim_data.append(
                 evaluation.SSIM(
                         image.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1]),
-                        output.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
+                        avg_output.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
                         )
                 )
         precision.append(evaluation.precision(mask, mse).cpu().numpy())
         recall.append(evaluation.recall(mask, mse).cpu().numpy())
         IOU.append(evaluation.IoU(mask, mse))
         FPR.append(evaluation.FPR(mask, mse).cpu().numpy())
+
+        if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
+            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % 4}'
+        else:
+            heatmap_name = f'{i}'
+        evaluation.heatmap(
+                image, avg_output.reshape(1, *args["img_size"]).to(device), mask,
+                f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps/{heatmap_name}.png'
+                )
+
+        if uncertainty:
+            # variance across the n_samples_unc independent final reconstructions
+            unc = outputs.var(dim=0)
+            unc_scaled = (unc / unc.max().clamp(min=1e-8)) * 2 - 1
+            # average of the per-pass anomaly maps (not the anomaly map of the
+            # averaged reconstruction)
+            anomaly_map = (image.unsqueeze(0) - outputs).square().mean(dim=0)
+            anom_scaled = (anomaly_map * 2) - 1
+            anom_thresh = (anom_scaled > 0).float() * 2 - 1
+
+            panels = [image, avg_output, anom_scaled, anom_thresh, mask, unc_scaled]
+            titles = ["Image", "Reconstruction", "Anomaly Scaled", "Anomaly Thresh", "Ground Truth Mask",
+                      "MC Reconstruction Variance"]
+            fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 4))
+            for ax, panel, title in zip(axes, panels, titles):
+                ax.imshow(gridify_output(panel, 1), cmap='gray')
+                ax.set_title(title)
+                ax.axis('off')
+            plt.savefig(
+                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}.png'
+                    )
+            plt.clf()
+
+            torch.save(
+                    {"outputs": outputs.cpu(), "unc": unc.cpu()},
+                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}_pred_x0.pt'
+                    )
+
+            if save_output:
+                folder_name, slice_idx = heatmap_name.split("-slice=") if "-slice=" in heatmap_name else (heatmap_name, "0")
+                path = Path("./results") / folder_name / slice_idx
+                
+                path.mkdir(parents=True, exist_ok=True)
+
+                np.save(f'{path}/{heatmap_name}_image.npy', image.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_mask.npy', mask.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_anomaly.npy', anomaly_map.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_unc.npy', unc.cpu().numpy())
+
         plt.close('all')
 
         if i % 8 == 0:
@@ -285,6 +347,33 @@ def anomalous_metric_calculation():
         f.write("dice,ssim,iou,precision,recall,fpr,auc\n")
         for METRIC in [dice_data, ssim_data, IOU, precision, recall, FPR, AUC_scores]:
             f.write(f"{np.mean(METRIC):.4f} +- {np.std(METRIC):.4f},")
+
+
+def _initial_validation_args(args, n_samples_unc, save_output: bool, uncertainty: bool) -> int:
+    try:
+        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps')
+    except OSError:
+        pass
+
+    if save_output and not uncertainty:
+        raise ValueError("save_output requires uncertainty to also be enabled")
+
+    if uncertainty:
+        try:
+            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
+        except OSError:
+            pass
+        if n_samples_unc is None:
+            if "n_samples_unc" not in args:
+                args["n_samples_unc"] = 10
+            n_samples_unc = int(args["n_samples_unc"])
+        if n_samples_unc < 2:
+            raise ValueError(
+                f"n_samples_unc must be >= 2 to compute a variance for uncertainty maps, got {n_samples_unc}")
+        print(f"Running MC sampling with {n_samples_unc} independent forward_backward passes per image")
+    else:
+        n_samples_unc = 1
+    return n_samples_unc
 
 
 def graph_data():
@@ -922,8 +1011,35 @@ def ce_sliding_window(img, netG, input_cropped, args):
 
 if __name__ == "__main__":
     import sys
+    import argparse
 
-    DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
+    parser = argparse.ArgumentParser(description="AnoDDPM detection pipeline")
+    parser.add_argument(
+            '--uncertainty', action='store_true',
+            help='Run uncertainty detection — saves per-t anomaly and uncertainty maps'
+            )
+    parser.add_argument(
+            '--n-samples-unc', type=int, default=None, dest='n_samples_unc',
+            help='Number of MC sampling passes per image for uncertainty maps '
+                 '(overrides n_samples_unc in the args config if set)'
+            )
+    parser.add_argument(
+            '--save-output', action='store_true', dest='save_output',
+            help='Save per-slice .npy files (brain slice, ground truth mask, anomaly map, '
+                 'uncertainty map) to ./results/. Requires --uncertainty.'
+            )
+    parser.add_argument(
+            '--sample-distance', type=int, default=None, dest='sample_distance',
+            help='Override the diffusion noise depth (t_distance). NOTE: the value in '
+                 'test_args/*.json is IGNORED because args are loaded from the model '
+                 'checkpoint (which has sample_distance baked in); use this flag to control it.'
+            )
+    cli_args, _ = parser.parse_known_args()
+
+    if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
+        DATASET_PATH = str(sys.argv[2])
+    else:
+        DATASET_PATH = './DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # if str(sys.argv[1]) == "100":
@@ -946,5 +1062,7 @@ if __name__ == "__main__":
         sys.argv[1] = "28"
         graph_data()
     else:
-
-        anomalous_metric_calculation()
+        anomalous_metric_calculation(
+            uncertainty=cli_args.uncertainty, n_samples_unc=cli_args.n_samples_unc,
+            save_output=cli_args.save_output, sample_distance=cli_args.sample_distance,
+        )

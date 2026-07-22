@@ -11,5 +11,6 @@ library_NFBS/NFBS_Dataset.tar
 diffusion-videos
 diffusion-training-images
 model
-temp.txtorientation_check/
+temp.txt
+orientation_check/
 __pycache__/

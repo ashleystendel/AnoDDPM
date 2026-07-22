@@ -1,6 +1,8 @@
 library_NFBS
 DATASETS/*
 model/*
+metrics/*
+results/*
 diffusion-*/
 library_NFBS/NFBS_Dataset.tar
 .idea

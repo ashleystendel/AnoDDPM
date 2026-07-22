@@ -23,5 +23,6 @@
   "num_heads": 2,
   "num_head_channels": -1,
   "noise_fn": "gauss",
-  "dataset": "mri"
+  "dataset": "mri",
+  "n_samples_unc": 6
 }

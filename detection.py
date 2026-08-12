@@ -154,7 +154,9 @@ def anomalous_validation_1():
                 )
 
 
-def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None):
+def anomalous_metric_calculation(
+        uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None, slices_per_patient=4
+        ):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
     the heatmap of that & detection method (A&B) or C
@@ -195,9 +197,10 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
     else:
         d_set = dataset.AnomalousMRIDataset(
                 ROOT_DIR=f'{DATASET_PATH}', img_size=args['img_size'],
-                slice_selection="iterateKnown_restricted", resized=False, cleaned=True
+                slice_selection="iterateKnown_restricted", resized=False, cleaned=True,
+                slices_per_patient=slices_per_patient
                 )
-        d_set_size = len(d_set) * 4
+        d_set_size = len(d_set) * slices_per_patient
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
@@ -214,12 +217,12 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
     start_time = time.time()
     for i in range(d_set_size):
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
-            if i % 4 == 0:
+            if i % slices_per_patient == 0:
                 new = next(loader)
                 new["image"] = new["image"].reshape(new["image"].shape[1], 1, *args["img_size"])
                 new["mask"] = new["mask"].reshape(new["mask"].shape[1], 1, *args["img_size"])
-            image = new["image"][i % 4, ...].to(device).reshape(1, 1, *args["img_size"])
-            mask = new["mask"][i % 4, ...].to(device).reshape(1, 1, *args["img_size"])
+            image = new["image"][i % slices_per_patient, ...].to(device).reshape(1, 1, *args["img_size"])
+            mask = new["mask"][i % slices_per_patient, ...].to(device).reshape(1, 1, *args["img_size"])
         else:
             new = next(loader)
             image = new["image"].to(device)
@@ -263,7 +266,7 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
         FPR.append(evaluation.FPR(mask, mse).cpu().numpy())
 
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
-            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % 4}'
+            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % slices_per_patient}'
         else:
             heatmap_name = f'{i}'
         evaluation.heatmap(
@@ -325,14 +328,15 @@ def anomalous_metric_calculation(uncertainty=False, n_samples_unc=None, save_out
                     f"remaining time: {hours}:{mins:02.0f}"
                     )
 
-        if i % 4 == 0 and (args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather"):
+        if i % slices_per_patient == 0 and (args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather"):
+            spp = slices_per_patient
             print(f"file: {new['filenames'][0][-9:-4]}")
-            print(f"Dice: {np.mean(dice_data[-4:])} +- {np.std(dice_data[-4:])}")
-            print(f"Structural Similarity Index (SSIM): {np.mean(ssim_data[-4:])} +- {np.std(ssim_data[-4:])}")
-            print(f"Precision: {np.mean(precision[-4:])} +- {np.std(precision[-4:])}")
-            print(f"Recall: {np.mean(recall[-4:])} +- {np.std(recall[-4:])}")
-            print(f"FPR: {np.mean(FPR[-4:])} +- {np.std(FPR[-4:])}")
-            print(f"IOU: {np.mean(IOU[-4:])} +- {np.std(IOU[-4:])}")
+            print(f"Dice: {np.mean(dice_data[-spp:])} +- {np.std(dice_data[-spp:])}")
+            print(f"Structural Similarity Index (SSIM): {np.mean(ssim_data[-spp:])} +- {np.std(ssim_data[-spp:])}")
+            print(f"Precision: {np.mean(precision[-spp:])} +- {np.std(precision[-spp:])}")
+            print(f"Recall: {np.mean(recall[-spp:])} +- {np.std(recall[-spp:])}")
+            print(f"FPR: {np.mean(FPR[-spp:])} +- {np.std(FPR[-spp:])}")
+            print(f"IOU: {np.mean(IOU[-spp:])} +- {np.std(IOU[-spp:])}")
             print("\n")
 
     print()
@@ -1034,6 +1038,12 @@ if __name__ == "__main__":
                  'test_args/*.json is IGNORED because args are loaded from the model '
                  'checkpoint (which has sample_distance baked in); use this flag to control it.'
             )
+    parser.add_argument(
+            '--slices-per-patient', type=int, default=4, dest='slices_per_patient',
+            help='How many slices to pull per volume from the known tumour range. '
+                 '1 picks only the single slice with the largest tumour area (cheap, one '
+                 'MC pass per patient instead of 4).'
+            )
     cli_args, _ = parser.parse_known_args()
 
     if len(sys.argv) >= 3 and not sys.argv[2].startswith('--'):
@@ -1065,4 +1075,5 @@ if __name__ == "__main__":
         anomalous_metric_calculation(
             uncertainty=cli_args.uncertainty, n_samples_unc=cli_args.n_samples_unc,
             save_output=cli_args.save_output, sample_distance=cli_args.sample_distance,
+            slices_per_patient=cli_args.slices_per_patient,
         )

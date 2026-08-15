@@ -618,18 +618,21 @@ class MRIDataset(Dataset):
             pass
         else:
             img_name = os.path.join(
-                    self.ROOT_DIR, self.filenames[idx], f"sub-{self.filenames[idx]}_ses-NFB3_T1w.nii.gz"
+                    self.ROOT_DIR, self.filenames[idx], f"sub-{self.filenames[idx]}_ses-NFB3_T1w_brain.nii.gz"
                     )
             # random between 40 and 130
             # print(nib.load(img_name).slicer[:,90:91,:].dataobj.shape)
             img = nib.load(img_name)
             image = img.get_fdata()
 
-            image_mean = np.mean(image)
-            image_std = np.std(image)
-            img_range = (image_mean - 1 * image_std, image_mean + 2 * image_std)
-            image = np.clip(image, img_range[0], img_range[1])
-            image = image / (img_range[1] - img_range[0])
+            # percentile min-max within the brain (matches scripts/ixi_dataset.py):
+            # clip brain to [1,99] percentile, scale to [0,1]; background stays 0.
+            fg_mask = image > 0
+            fg = image[fg_mask]
+            lo, hi = np.percentile(fg, 1), np.percentile(fg, 99)
+            image = np.clip(image, lo, hi)
+            image = (image - lo) / (hi - lo)
+            image[~fg_mask] = 0
             np.save(
                     os.path.join(self.ROOT_DIR, self.filenames[idx], f"{self.filenames[idx]}.npy"), image.astype(
                             np.float32

@@ -1,3 +1,4 @@
+import json
 import os
 from random import randint
 
@@ -648,7 +649,7 @@ class AnomalousMRIDataset(Dataset):
 
     def __init__(
             self, ROOT_DIR, transform=None, img_size=(32, 32), slice_selection="random", resized=False,
-            cleaned=True
+            cleaned=True, slices_per_patient=4
             ):
         """
         Args:
@@ -659,27 +660,54 @@ class AnomalousMRIDataset(Dataset):
             slice_selection: "random" = randomly selects a slice from the image
                              "iterateKnown" = iterates between ranges of tumour using slice data
                              "iterateUnKnown" = iterates through whole MRI volume
+            slices_per_patient: for "iterateKnown_restricted" -- how many slices to pull per
+                volume. slices_per_patient=1 picks the single slice with the largest tumour
+                area in the known range instead of evenly-spaced ones.
         """
-        self.transform = transforms.Compose(
-                [transforms.ToPILImage(),
-                 transforms.CenterCrop((175, 240)),
-                 # transforms.RandomAffine(0, translate=(0.02, 0.1)),
-                 transforms.Resize(img_size, transforms.InterpolationMode.BILINEAR),
-                 # transforms.CenterCrop(256),
-                 transforms.ToTensor(),
-                 transforms.Normalize((0.5), (0.5))
-                 ]
-                ) if not transform else transform
+        self.slices_per_patient = slices_per_patient
+        # A ROOT_DIR with its own slices.json (patient_id -> [start, stop]) is treated as a
+        # generic dataset (e.g. BraTS) already pre-cropped/padded to the training canvas, so it
+        # gets the same CenterCrop(235)+Resize used for the healthy MRIDataset instead of the
+        # crop tuned specifically for the Edinburgh raw geometry.
+        slices_path = os.path.join(ROOT_DIR, "slices.json")
+        custom_slices = os.path.exists(slices_path)
+        if not transform:
+            if custom_slices:
+                transform = transforms.Compose(
+                        [transforms.ToPILImage(),
+                         transforms.CenterCrop(235),
+                         transforms.Resize(img_size, transforms.InterpolationMode.BILINEAR),
+                         transforms.ToTensor(),
+                         transforms.Normalize((0.5), (0.5))
+                         ]
+                        )
+            else:
+                transform = transforms.Compose(
+                        [transforms.ToPILImage(),
+                         transforms.CenterCrop((175, 240)),
+                         # transforms.RandomAffine(0, translate=(0.02, 0.1)),
+                         transforms.Resize(img_size, transforms.InterpolationMode.BILINEAR),
+                         # transforms.CenterCrop(256),
+                         transforms.ToTensor(),
+                         transforms.Normalize((0.5), (0.5))
+                         ]
+                        )
+        self.transform = transform
         self.img_size = img_size
         self.resized = resized
-        self.slices = {
-            "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
-            "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
-            "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
-            "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
-            "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
-            "19723": range(140, 170), "19849": range(150, 180)
-            }
+        if custom_slices:
+            with open(slices_path) as f:
+                raw_slices = json.load(f)
+            self.slices = {pid: range(start, stop) for pid, (start, stop) in raw_slices.items()}
+        else:
+            self.slices = {
+                "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
+                "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
+                "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
+                "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
+                "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
+                "19723": range(140, 170), "19849": range(150, 180)
+                }
 
         self.filenames = self.slices.keys()
         if cleaned:
@@ -756,9 +784,14 @@ class AnomalousMRIDataset(Dataset):
         elif self.slice_selection == "iterateKnown_restricted":
 
             temp_range = self.slices[self.filenames[idx][-9:-4]]
-            output = torch.empty(4, *self.img_size)
-            output_mask = torch.empty(4, *self.img_size)
-            slices = np.linspace(temp_range.start + 5, temp_range.stop - 5, 4).astype(np.int32)
+            n = self.slices_per_patient
+            output = torch.empty(n, *self.img_size)
+            output_mask = torch.empty(n, *self.img_size)
+            if n == 1:
+                areas = [(img_mask[v, ...] > 0).sum() for v in temp_range]
+                slices = [temp_range.start + int(np.argmax(areas))]
+            else:
+                slices = np.linspace(temp_range.start + 5, temp_range.stop - 5, n).astype(np.int32)
             for counter, i in enumerate(slices):
                 temp = image[i, ...].reshape(image.shape[1], image.shape[2]).astype(np.float32)
                 temp_mask = img_mask[i, ...].reshape(image.shape[1], image.shape[2]).astype(np.float32)

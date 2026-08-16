@@ -64,16 +64,17 @@ def split_patients(data_dir, n_val, n_test, seed=0):
     return train, val, test
 
 
-def compute_norm_stats(data_dir, patient_ids):
+def compute_norm_stats(data_dir, patient_ids, channels=CHANNELS):
     """Per-channel mean/std over the given (training) patients."""
     patient_ids = set(patient_ids)
-    s = np.zeros(3, dtype=np.float64)
-    sq = np.zeros(3, dtype=np.float64)
+    n_ch = len(channels)
+    s = np.zeros(n_ch, dtype=np.float64)
+    sq = np.zeros(n_ch, dtype=np.float64)
     n = 0
     for pid, prefix in list_samples(data_dir):
         if pid not in patient_ids:
             continue
-        for c, name in enumerate(CHANNELS):
+        for c, name in enumerate(channels):
             a = np.load(f"{prefix}_{name}.npy").astype(np.float64).ravel()
             s[c] += a.sum()
             sq[c] += (a * a).sum()
@@ -86,13 +87,15 @@ def compute_norm_stats(data_dir, patient_ids):
 
 
 class SegmentationDataset(Dataset):
-    """3-channel (image, anomaly, unc) input + binary tumour mask target."""
+    """Configurable-channel input (default image, anomaly, unc) + binary tumour mask target."""
 
-    def __init__(self, data_dir, patient_ids, norm_mean, norm_std):
+    def __init__(self, data_dir, patient_ids, norm_mean, norm_std, channels=CHANNELS):
         patient_ids = set(patient_ids)
         self.samples = [p for p in list_samples(data_dir) if p[0] in patient_ids]
-        self.mean = np.asarray(norm_mean, dtype=np.float32).reshape(3, 1, 1)
-        self.std = np.asarray(norm_std, dtype=np.float32).reshape(3, 1, 1)
+        self.channels = channels
+        n_ch = len(channels)
+        self.mean = np.asarray(norm_mean, dtype=np.float32).reshape(n_ch, 1, 1)
+        self.std = np.asarray(norm_std, dtype=np.float32).reshape(n_ch, 1, 1)
 
     def __len__(self):
         return len(self.samples)
@@ -102,8 +105,8 @@ class SegmentationDataset(Dataset):
 
     def __getitem__(self, idx):
         _, prefix = self.samples[idx]
-        x = np.stack([self._load(prefix, name) for name in CHANNELS], axis=0)  # (3,H,W)
-        y = (self._load(prefix, "mask") > 0).astype(np.float32)[None]          # (1,H,W)
+        x = np.stack([self._load(prefix, name) for name in self.channels], axis=0)  # (C,H,W)
+        y = (self._load(prefix, "mask") > 0).astype(np.float32)[None]               # (1,H,W)
         x = (x - self.mean) / self.std
         return torch.from_numpy(x), torch.from_numpy(y)
 
@@ -168,48 +171,62 @@ def dice_loss(logits, target, smooth=1e-6):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, threshold=0.5):
+def evaluate(model, loader, device, threshold=0.5, pos_weight=1.0):
     model.eval()
-    dices, ious = [], []
+    dices, ious, losses = [], [], []
+    pw = torch.tensor([pos_weight], device=device)
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        preds = (torch.sigmoid(model(x)) > threshold).float()
+        logits = model(x)
+        losses.append(
+                (F.binary_cross_entropy_with_logits(logits, y, pos_weight=pw) + dice_loss(logits, y)).item()
+                )
+        preds = (torch.sigmoid(logits) > threshold).float()
         inter = (preds * y).sum(dim=[1, 2, 3])
         union = preds.sum(dim=[1, 2, 3]) + y.sum(dim=[1, 2, 3])
         u = union - inter
         dices.append((2 * inter + 1e-6) / (union + 1e-6))
         ious.append((inter + 1e-6) / (u + 1e-6))
     if not dices:
-        return {"dice": 0.0, "iou": 0.0}
-    return {"dice": torch.cat(dices).mean().item(), "iou": torch.cat(ious).mean().item()}
+        return {"dice": 0.0, "iou": 0.0, "loss": float("inf")}
+    return {
+            "dice": torch.cat(dices).mean().item(), "iou": torch.cat(ious).mean().item(),
+            "loss": float(np.mean(losses)),
+            }
 
 
 # --------------------------------------------------------------------- training
 def train_model(hp, train_ids, val_ids, data_dir=DATA_DIR, epochs=200, device=None,
-                checkpoint_path=None, extra=None, seed=0, verbose=True):
-    """Train the U-Net for `epochs`, tracking the best val Dice.
+                checkpoint_path=None, extra=None, seed=0, verbose=True, select_by="dice",
+                channels=CHANNELS):
+    """Train the U-Net for `epochs`.
 
     hp keys: lr, base_channels, batch_size, dropout, weight_decay, pos_weight.
-    Returns the best validation Dice. If checkpoint_path is given, the best model
-    (plus norm stats, hparams and `extra`) is saved there.
+    select_by: "dice" checkpoints on the best val Dice (higher is better); "loss"
+        checkpoints on the lowest val loss (BCE+soft-dice) instead. Returns the best
+        value of whichever metric was used for selection. If checkpoint_path is given,
+        the best model (plus norm stats, hparams and `extra`) is saved there.
+    channels: which saved channels to feed the model (default image, anomaly, unc).
     """
+    assert select_by in ("dice", "loss")
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    mean, std = compute_norm_stats(data_dir, train_ids)
-    train_set = SegmentationDataset(data_dir, train_ids, mean, std)
-    val_set = SegmentationDataset(data_dir, val_ids, mean, std)
+    mean, std = compute_norm_stats(data_dir, train_ids, channels)
+    train_set = SegmentationDataset(data_dir, train_ids, mean, std, channels)
+    val_set = SegmentationDataset(data_dir, val_ids, mean, std, channels)
     bs = int(hp["batch_size"])
     train_loader = DataLoader(train_set, batch_size=bs, shuffle=True, drop_last=len(train_set) > bs)
     val_loader = DataLoader(val_set, batch_size=bs, shuffle=False)
 
-    model = SegmentationUNet(3, int(hp["base_channels"]), float(hp.get("dropout", 0.0))).to(device)
+    model = SegmentationUNet(len(channels), int(hp["base_channels"]), float(hp.get("dropout", 0.0))).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(hp["lr"]), weight_decay=float(hp.get("weight_decay", 0.0)))
     pos_weight = torch.tensor([float(hp.get("pos_weight", 1.0))], device=device)
 
-    best = -1.0
+    best = -1.0 if select_by == "dice" else float("inf")
+    best_dice_seen, best_loss_seen = -1.0, float("inf")
     for epoch in range(epochs):
         model.train()
         losses = []
@@ -222,21 +239,28 @@ def train_model(hp, train_ids, val_ids, data_dir=DATA_DIR, epochs=200, device=No
             opt.step()
             losses.append(loss.item())
 
-        metrics = evaluate(model, val_loader, device)
-        if metrics["dice"] > best:
-            best = metrics["dice"]
+        metrics = evaluate(model, val_loader, device, pos_weight=float(hp.get("pos_weight", 1.0)))
+        best_dice_seen = max(best_dice_seen, metrics["dice"])
+        best_loss_seen = min(best_loss_seen, metrics["loss"])
+        improved = metrics["dice"] > best if select_by == "dice" else metrics["loss"] < best
+        if improved:
+            best = metrics["dice"] if select_by == "dice" else metrics["loss"]
             if checkpoint_path:
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
                 ckpt = {
                         "model_state_dict": model.state_dict(), "hparams": dict(hp),
-                        "norm_mean": mean, "norm_std": std, "epoch": epoch, "val_dice": best,
+                        "norm_mean": mean, "norm_std": std, "epoch": epoch,
+                        "val_dice": metrics["dice"], "val_loss": metrics["loss"], "select_by": select_by,
+                        "channels": channels,
                         }
                 if extra:
                     ckpt.update(extra)
                 torch.save(ckpt, checkpoint_path)
         if verbose and (epoch % 10 == 0 or epoch == epochs - 1):
-            print(f"epoch {epoch:3d}: train_loss={np.mean(losses):.4f} "
-                  f"val_dice={metrics['dice']:.4f} val_iou={metrics['iou']:.4f} (best {best:.4f})")
+            print(f"epoch {epoch:3d}: train_loss={np.mean(losses):.4f} val_loss={metrics['loss']:.4f} "
+                  f"val_dice={metrics['dice']:.4f} val_iou={metrics['iou']:.4f} "
+                  f"(best {select_by}={best:.4f} | best_dice_seen={best_dice_seen:.4f} "
+                  f"best_loss_seen={best_loss_seen:.4f})")
     return best
 
 
@@ -253,29 +277,41 @@ def main():
     p.add_argument("--n_val", type=int, default=4)
     p.add_argument("--n_test", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--select_by", choices=["dice", "loss"], default="dice",
+                   help="checkpoint on best val Dice (default) or lowest val loss")
+    p.add_argument("--channels", default=",".join(CHANNELS),
+                   help="comma-separated input channels, e.g. 'image' for an image-only ablation "
+                        "(default: image,anomaly,unc)")
+    p.add_argument("--tag", default=None,
+                   help="suffix for the checkpoint filename, e.g. best_dice_imageonly.pt")
     args = p.parse_args()
+    channels = tuple(args.channels.split(","))
 
     train_ids, val_ids, test_ids = split_patients(args.data_dir, args.n_val, args.n_test, args.seed)
     print(f"patients -> train {len(train_ids)} | val {len(val_ids)} | test {len(test_ids)}")
     print(f"  val:  {val_ids}")
     print(f"  test: {test_ids}")
+    print(f"  channels: {channels}")
 
     hp = dict(lr=args.lr, base_channels=args.base_channels, batch_size=args.batch_size,
               dropout=args.dropout, weight_decay=args.weight_decay, pos_weight=args.pos_weight)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt_path = f"{CHECKPOINT_DIR}/best.pt"
+    tag = f"_{args.tag}" if args.tag else ""
+    ckpt_path = f"{CHECKPOINT_DIR}/best_{args.select_by}{tag}.pt"
     extra = dict(n_val=args.n_val, n_test=args.n_test, split_seed=args.seed, data_dir=args.data_dir)
 
     best_val = train_model(hp, train_ids, val_ids, args.data_dir, args.epochs, device,
-                           ckpt_path, extra=extra, seed=args.seed)
+                           ckpt_path, extra=extra, seed=args.seed, select_by=args.select_by,
+                           channels=channels)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model = SegmentationUNet(3, hp["base_channels"], hp["dropout"]).to(device)
+    model = SegmentationUNet(len(channels), hp["base_channels"], hp["dropout"]).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
-    test_set = SegmentationDataset(args.data_dir, test_ids, ckpt["norm_mean"], ckpt["norm_std"])
+    test_set = SegmentationDataset(args.data_dir, test_ids, ckpt["norm_mean"], ckpt["norm_std"], channels)
     test_metrics = evaluate(model, DataLoader(test_set, batch_size=args.batch_size), device)
-    print(f"\nBest val dice: {best_val:.4f}")
-    print(f"TEST: dice={test_metrics['dice']:.4f} iou={test_metrics['iou']:.4f}")
+    print(f"\nSelection criterion: {args.select_by}")
+    print(f"Best val {args.select_by}: {best_val:.4f} (at epoch {ckpt['epoch']}, val_dice={ckpt['val_dice']:.4f}, val_loss={ckpt['val_loss']:.4f})")
+    print(f"TEST: dice={test_metrics['dice']:.4f} iou={test_metrics['iou']:.4f} loss={test_metrics['loss']:.4f}")
     print(f"Checkpoint: {ckpt_path}")
 
 

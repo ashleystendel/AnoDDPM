@@ -7,5 +7,6 @@ print("Creating DATASETS folders... ")
 Path(root_folder / "DATASETS").mkdir(parents=True, exist_ok=True)
 Path(root_folder / "DATASETS" / "Train").mkdir(parents=True, exist_ok=True)
 Path(root_folder / "DATASETS" / "Test").mkdir(parents=True, exist_ok=True)
+Path(root_folder / "metrics").mkdir(parents=True, exist_ok=True)
 
 print("Done")

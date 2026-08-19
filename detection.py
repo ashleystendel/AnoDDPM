@@ -1,3 +1,4 @@
+import datetime
 import random
 import time
 from pathlib import Path
@@ -153,9 +154,47 @@ def anomalous_validation_1():
                 f"remaining time: {hours}:{mins:02.0f}"
                 )
 
+AGGREGATION_METHODS = ("mean", "median", "min_error", "majority_vote")
+
+
+def _aggregate_mc(outputs, image):
+    """
+    outputs: (n_samples, B, C, H, W) stacked independent forward_backward reconstructions
+    image: (B, C, H, W) original input
+
+    Returns {method: (recon, anomaly_map)}, each (B, C, H, W), for every method in
+    AGGREGATION_METHODS -- computed from the same MC passes so they're directly comparable.
+
+    - mean: current default. Blends together "usually right, occasionally noisy" normal
+      tissue with genuine anomaly signal.
+    - median: robust central tendency: not dragged toward any single divergent pass.
+    - min_error: per-pixel, take the reconstruction pass with the lowest error. Exploits
+      the asymmetry that normal tissue gets reconstructed accurately on *some* pass, while
+      true anomalies (never seen in training) stay wrong on *every* pass.
+    - majority_vote: threshold each pass independently, then take the fraction of passes
+      that agree a pixel is anomalous -- a spurious single-pass flag gets voted out.
+    """
+    errors = (image.unsqueeze(0) - outputs).square()  # (n, B, C, H, W)
+
+    results = {}
+
+    mean_recon = outputs.mean(dim=0)
+    results["mean"] = (mean_recon, errors.mean(dim=0))
+
+    median_recon = outputs.median(dim=0).values
+    results["median"] = (median_recon, errors.median(dim=0).values)
+
+    min_err, min_idx = errors.min(dim=0)
+    min_recon = torch.gather(outputs, 0, min_idx.unsqueeze(0)).squeeze(0)
+    results["min_error"] = (min_recon, min_err)
+
+    vote_fraction = (errors > 0.5).float().mean(dim=0)
+    results["majority_vote"] = (mean_recon, vote_fraction)
+
+    return results
 
 def anomalous_metric_calculation(
-        uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None, slices_per_patient=4
+        uncertainty=False, n_samples_unc=None, save_output=False, sample_distance=None, n_slices=4, agg_method="mean"
         ):
     """
     Iterates over 4 anomalous slices for each Volume, returning diffused video for it,
@@ -198,13 +237,20 @@ def anomalous_metric_calculation(
         d_set = dataset.AnomalousMRIDataset(
                 ROOT_DIR=f'{DATASET_PATH}', img_size=args['img_size'],
                 slice_selection="iterateKnown_restricted", resized=False, cleaned=True,
-                slices_per_patient=slices_per_patient
+                slices_per_patient=n_slices
                 )
-        d_set_size = len(d_set) * slices_per_patient
+        d_set_size = len(d_set) * n_slices
     loader = dataset.init_dataset_loader(d_set, args)
     plt.rcParams['figure.dpi'] = 200
 
-    n_samples_unc = _initial_validation_args(args, n_samples_unc, save_output, uncertainty)
+    if agg_method not in AGGREGATION_METHODS:
+        raise ValueError(f"agg_method must be one of {AGGREGATION_METHODS}, got {agg_method!r}")
+
+    n_samples_unc = _initial_validation_args(args, n_samples_unc, save_output, uncertainty, agg_method)
+
+    image_dir = Path(f'./diffusion-training-images/ARGS={args["arg_num"]}/{agg_method}')
+    heatmap_dir = image_dir / "Anomalous-heatmaps"
+    uncertainty_dir = image_dir / "uncertainty"
 
     dice_data = []
     ssim_data = []
@@ -217,12 +263,12 @@ def anomalous_metric_calculation(
     start_time = time.time()
     for i in range(d_set_size):
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
-            if i % slices_per_patient == 0:
+            if i % n_slices == 0:
                 new = next(loader)
                 new["image"] = new["image"].reshape(new["image"].shape[1], 1, *args["img_size"])
                 new["mask"] = new["mask"].reshape(new["mask"].shape[1], 1, *args["img_size"])
-            image = new["image"][i % slices_per_patient, ...].to(device).reshape(1, 1, *args["img_size"])
-            mask = new["mask"][i % slices_per_patient, ...].to(device).reshape(1, 1, *args["img_size"])
+            image = new["image"][i % n_slices, ...].to(device).reshape(1, 1, *args["img_size"])
+            mask = new["mask"][i % n_slices, ...].to(device).reshape(1, 1, *args["img_size"])
         else:
             new = next(loader)
             image = new["image"].to(device)
@@ -240,77 +286,76 @@ def anomalous_metric_calculation(
                     for _ in range(n_samples_unc)
                     ], dim=0
                 )
-        avg_output = outputs.mean(dim=0)
 
-        mse = (image - avg_output).square()
-        fpr_simplex, tpr_simplex, _ = evaluation.ROC_AUC(mask.to(torch.uint8), mse)
+        recon, amap = _aggregate_mc(outputs, image)[agg_method]
+
+        fpr_simplex, tpr_simplex, _ = evaluation.ROC_AUC(mask.to(torch.uint8), amap)
         AUC_scores.append(evaluation.AUC_score(fpr_simplex, tpr_simplex))
-        mse = (mse > 0.5).float()
-        # print(img.shape, output.shape, img_mask.shape, mse.shape)
+        amap_bin = (amap > 0.5).float()
         dice_data.append(
                 evaluation.dice_coeff(
-                        image, avg_output.to(device),
-                        mask, mse=mse
+                        image, recon.to(device),
+                        mask, mse=amap_bin
                         ).cpu().item()
                 )
 
         ssim_data.append(
                 evaluation.SSIM(
                         image.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1]),
-                        avg_output.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
+                        recon.permute(0, 2, 3, 1).reshape(*args["img_size"], image.shape[1])
                         )
                 )
-        precision.append(evaluation.precision(mask, mse).cpu().numpy())
-        recall.append(evaluation.recall(mask, mse).cpu().numpy())
-        IOU.append(evaluation.IoU(mask, mse))
-        FPR.append(evaluation.FPR(mask, mse).cpu().numpy())
+        precision.append(evaluation.precision(mask, amap_bin).cpu().numpy())
+        recall.append(evaluation.recall(mask, amap_bin).cpu().numpy())
+        IOU.append(evaluation.IoU(mask, amap_bin))
+        FPR.append(evaluation.FPR(mask, amap_bin).cpu().numpy())
 
         if args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather":
-            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % slices_per_patient}'
+            heatmap_name = f'{new["filenames"][0][-9:-4]}-slice={i % n_slices}'
         else:
             heatmap_name = f'{i}'
         evaluation.heatmap(
-                image, avg_output.reshape(1, *args["img_size"]).to(device), mask,
-                f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps/{heatmap_name}.png'
+                image, recon.reshape(1, *args["img_size"]).to(device), mask,
+                str(heatmap_dir / f'{heatmap_name}.png')
                 )
 
         if uncertainty:
-            # variance across the n_samples_unc independent final reconstructions
+            # variance across the n_samples_unc independent MC passes
             unc = outputs.var(dim=0)
             unc_scaled = (unc / unc.max().clamp(min=1e-8)) * 2 - 1
-            # average of the per-pass anomaly maps (not the anomaly map of the
-            # averaged reconstruction)
-            anomaly_map = (image.unsqueeze(0) - outputs).square().mean(dim=0)
-            anom_scaled = (anomaly_map * 2) - 1
-            anom_thresh = (anom_scaled > 0).float() * 2 - 1
 
-            panels = [image, avg_output, anom_scaled, anom_thresh, mask, unc_scaled]
-            titles = ["Image", "Reconstruction", "Anomaly Scaled", "Anomaly Thresh", "Ground Truth Mask",
-                      "MC Reconstruction Variance"]
+            amap_scaled = (amap * 2) - 1
+            amap_thresh = (amap_scaled > 0).float() * 2 - 1
+
+            panels = [image, recon, amap_scaled, amap_thresh, mask, unc_scaled]
+            titles = [
+                "Image", f"{agg_method} Reconstruction", "Anomaly Scaled", "Anomaly Thresh",
+                "Ground Truth Mask", "MC Reconstruction Variance"
+                ]
             fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 4))
             for ax, panel, title in zip(axes, panels, titles):
                 ax.imshow(gridify_output(panel, 1), cmap='gray')
                 ax.set_title(title)
                 ax.axis('off')
-            plt.savefig(
-                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}.png'
-                    )
+            plt.tight_layout()
+            plt.savefig(str(uncertainty_dir / f'{heatmap_name}.png'))
             plt.clf()
 
             torch.save(
                     {"outputs": outputs.cpu(), "unc": unc.cpu()},
-                    f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty/{heatmap_name}_pred_x0.pt'
+                    str(uncertainty_dir / f'{heatmap_name}_pred_x0.pt')
                     )
 
             if save_output:
                 folder_name, slice_idx = heatmap_name.split("-slice=") if "-slice=" in heatmap_name else (heatmap_name, "0")
-                path = Path("./results") / folder_name / slice_idx
-                
+                path = Path("./results") / agg_method / folder_name / slice_idx
+
                 path.mkdir(parents=True, exist_ok=True)
 
                 np.save(f'{path}/{heatmap_name}_image.npy', image.cpu().numpy())
                 np.save(f'{path}/{heatmap_name}_mask.npy', mask.cpu().numpy())
-                np.save(f'{path}/{heatmap_name}_anomaly.npy', anomaly_map.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_recon.npy', recon.cpu().numpy())
+                np.save(f'{path}/{heatmap_name}_anomaly.npy', amap.cpu().numpy())
                 np.save(f'{path}/{heatmap_name}_unc.npy', unc.cpu().numpy())
 
         plt.close('all')
@@ -328,34 +373,39 @@ def anomalous_metric_calculation(
                     f"remaining time: {hours}:{mins:02.0f}"
                     )
 
-        if i % slices_per_patient == 0 and (args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather"):
-            spp = slices_per_patient
+        if i % n_slices == 0 and (args["dataset"].lower() != "carpet" and args["dataset"].lower() != "leather"):
             print(f"file: {new['filenames'][0][-9:-4]}")
-            print(f"Dice: {np.mean(dice_data[-spp:])} +- {np.std(dice_data[-spp:])}")
-            print(f"Structural Similarity Index (SSIM): {np.mean(ssim_data[-spp:])} +- {np.std(ssim_data[-spp:])}")
-            print(f"Precision: {np.mean(precision[-spp:])} +- {np.std(precision[-spp:])}")
-            print(f"Recall: {np.mean(recall[-spp:])} +- {np.std(recall[-spp:])}")
-            print(f"FPR: {np.mean(FPR[-spp:])} +- {np.std(FPR[-spp:])}")
-            print(f"IOU: {np.mean(IOU[-spp:])} +- {np.std(IOU[-spp:])}")
+            print(f"Dice: {np.mean(dice_data[-n_slices:])} +- {np.std(dice_data[-n_slices:])}")
+            print(
+                    f"Structural Similarity Index (SSIM): {np.mean(ssim_data[-n_slices:])} +- "
+                    f"{np.std(ssim_data[-n_slices:])}"
+                    )
+            print(f"Precision: {np.mean(precision[-n_slices:])} +- {np.std(precision[-n_slices:])}")
+            print(f"Recall: {np.mean(recall[-n_slices:])} +- {np.std(recall[-n_slices:])}")
+            print(f"FPR: {np.mean(FPR[-n_slices:])} +- {np.std(FPR[-n_slices:])}")
+            print(f"IOU: {np.mean(IOU[-n_slices:])} +- {np.std(IOU[-n_slices:])}")
             print("\n")
 
     print()
-    print("Overall: ")
+    print(f"Overall ({agg_method}): ")
     print(f"Dice coefficient: {np.mean(dice_data)} +- {np.std(dice_data)}")
     print(f"Structural Similarity Index (SSIM): {np.mean(ssim_data)} +- {np.std(ssim_data)}")
     print(f"Precision: {np.mean(precision)} +- {np.std(precision)}")
     print(f"Recall: {np.mean(recall)} +- {np.std(recall)}")
     print(f"FPR: {np.mean(FPR)} +- {np.std(FPR)}")
     print(f"IOU: {np.mean(IOU)} +- {np.std(IOU)}")
-    with open(f"./metrics/args{args['arg_num']}.csv", mode="w") as f:
+
+    metrics_dir = Path(f"./metrics/{agg_method}")
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    with open(metrics_dir / f"args{args['arg_num']}.csv", mode="w") as f:
         f.write("dice,ssim,iou,precision,recall,fpr,auc\n")
         for METRIC in [dice_data, ssim_data, IOU, precision, recall, FPR, AUC_scores]:
             f.write(f"{np.mean(METRIC):.4f} +- {np.std(METRIC):.4f},")
 
 
-def _initial_validation_args(args, n_samples_unc, save_output: bool, uncertainty: bool) -> int:
+def _initial_validation_args(args, n_samples_unc, save_output: bool, uncertainty: bool, agg_method: str) -> int:
     try:
-        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/Anomalous-heatmaps')
+        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/{agg_method}/Anomalous-heatmaps')
     except OSError:
         pass
 
@@ -364,7 +414,7 @@ def _initial_validation_args(args, n_samples_unc, save_output: bool, uncertainty
 
     if uncertainty:
         try:
-            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/uncertainty')
+            os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}/{agg_method}/uncertainty')
         except OSError:
             pass
         if n_samples_unc is None:
@@ -1016,6 +1066,7 @@ def ce_sliding_window(img, netG, input_cropped, args):
 if __name__ == "__main__":
     import sys
     import argparse
+    print(datetime.datetime.now())
 
     parser = argparse.ArgumentParser(description="AnoDDPM detection pipeline")
     parser.add_argument(
@@ -1039,10 +1090,13 @@ if __name__ == "__main__":
                  'checkpoint (which has sample_distance baked in); use this flag to control it.'
             )
     parser.add_argument(
-            '--slices-per-patient', type=int, default=4, dest='slices_per_patient',
-            help='How many slices to pull per volume from the known tumour range. '
-                 '1 picks only the single slice with the largest tumour area (cheap, one '
-                 'MC pass per patient instead of 4).'
+            '--agg-method', type=str, default='mean', dest='agg_method', choices=AGGREGATION_METHODS,
+            help='MC pass aggregation method to use for reconstruction/anomaly scoring. '
+                 'Outputs (images, npy, metrics) are written under a folder named after it.'
+            )
+    parser.add_argument(
+            '--n-slices', type=int, default=4, dest='n_slices',
+            help='Number of slices to process per volume during inference (default: 4)'
             )
     cli_args, _ = parser.parse_known_args()
 
@@ -1074,6 +1128,6 @@ if __name__ == "__main__":
     else:
         anomalous_metric_calculation(
             uncertainty=cli_args.uncertainty, n_samples_unc=cli_args.n_samples_unc,
-            save_output=cli_args.save_output, sample_distance=cli_args.sample_distance,
-            slices_per_patient=cli_args.slices_per_patient,
+            save_output=cli_args.save_output, n_slices=cli_args.n_slices,
+            sample_distance=cli_args.sample_distance, agg_method=cli_args.agg_method,
         )

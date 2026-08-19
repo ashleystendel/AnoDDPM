@@ -29,7 +29,8 @@ def make_pngs_anogan():
         "Anomalous": "./DATASETS/CancerousDataset/EdinburghDataset/Anomalous-T1"
         }
     slices = {
-        "19567": range(165, 205),
+        "17904": range(165, 205)
+        #"19567": range(165, 205),
         # "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
         # "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
         # "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
@@ -711,12 +712,13 @@ class AnomalousMRIDataset(Dataset):
             self.slices = {pid: range(start, stop) for pid, (start, stop) in raw_slices.items()}
         else:
             self.slices = {
-                "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
-                "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
-                "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
-                "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
-                "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
-                "19723": range(140, 170), "19849": range(150, 180)
+                "17904": range(165, 205),
+                # "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
+                # "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
+                # "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
+                # "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
+                # "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
+                # "19723": range(140, 170), "19849": range(150, 180)
                 }
 
         self.filenames = self.slices.keys()
@@ -729,6 +731,7 @@ class AnomalousMRIDataset(Dataset):
             self.filenames.remove(".DS_Store")
         self.ROOT_DIR = ROOT_DIR
         self.slice_selection = slice_selection
+        self.slices_per_patient = slices_per_patient
 
     def __len__(self):
         return len(self.filenames)
@@ -765,6 +768,7 @@ class AnomalousMRIDataset(Dataset):
             img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-9:-4]}-resized.npy")
         else:
             img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-9:-4]}.npy")
+
         if self.slice_selection == "random":
             temp_range = self.slices[self.filenames[idx][-9:-4]]
             slice_idx = randint(temp_range.start, temp_range.stop)

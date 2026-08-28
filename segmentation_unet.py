@@ -198,7 +198,7 @@ def evaluate(model, loader, device, threshold=0.5, pos_weight=1.0):
 # --------------------------------------------------------------------- training
 def train_model(hp, train_ids, val_ids, data_dir=DATA_DIR, epochs=200, device=None,
                 checkpoint_path=None, extra=None, seed=0, verbose=True, select_by="dice",
-                channels=CHANNELS):
+                channels=CHANNELS, trial=None):
     """Train the U-Net for `epochs`.
 
     hp keys: lr, base_channels, batch_size, dropout, weight_decay, pos_weight.
@@ -207,6 +207,9 @@ def train_model(hp, train_ids, val_ids, data_dir=DATA_DIR, epochs=200, device=No
         value of whichever metric was used for selection. If checkpoint_path is given,
         the best model (plus norm stats, hparams and `extra`) is saved there.
     channels: which saved channels to feed the model (default image, anomaly, unc).
+    trial: optional optuna.Trial -- if given, reports val_dice each epoch and raises
+        optuna.TrialPruned() if the trial is clearly underperforming its peers at the
+        same epoch, so obviously-bad configs stop early instead of running to `epochs`.
     """
     assert select_by in ("dice", "loss")
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -256,6 +259,12 @@ def train_model(hp, train_ids, val_ids, data_dir=DATA_DIR, epochs=200, device=No
                 if extra:
                     ckpt.update(extra)
                 torch.save(ckpt, checkpoint_path)
+
+        if trial is not None:
+            import optuna
+            trial.report(metrics["dice"], epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
         if verbose and (epoch % 10 == 0 or epoch == epochs - 1):
             print(f"epoch {epoch:3d}: train_loss={np.mean(losses):.4f} val_loss={metrics['loss']:.4f} "
                   f"val_dice={metrics['dice']:.4f} val_iou={metrics['iou']:.4f} "

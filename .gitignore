@@ -13,3 +13,5 @@ diffusion-videos
 diffusion-training-images
 model
 temp.txt
+orientation_check/
+__pycache__/

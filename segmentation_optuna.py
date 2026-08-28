@@ -25,7 +25,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data_dir", default=DATA_DIR)
     p.add_argument("--trials", type=int, default=30)
-    p.add_argument("--epochs", type=int, default=60, help="epochs per trial")
+    p.add_argument("--epochs", type=int, default=40, help="epochs per trial")
     p.add_argument("--final_epochs", type=int, default=200, help="epochs to retrain the best config")
     p.add_argument("--n_val", type=int, default=4)
     p.add_argument("--n_test", type=int, default=4)
@@ -46,9 +46,10 @@ def main():
                 pos_weight=trial.suggest_float("pos_weight", 1.0, 20.0),
                 )
         return train_model(hp, train_ids, val_ids, args.data_dir, args.epochs,
-                           device, checkpoint_path=None, seed=args.seed, verbose=False)
+                           device, checkpoint_path=None, seed=args.seed, verbose=False, trial=trial)
 
-    study = optuna.create_study(direction="maximize")
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    study = optuna.create_study(direction="maximize", pruner=pruner)
     study.optimize(objective, n_trials=args.trials)
 
     print("\nBest val dice:", round(study.best_value, 4))
